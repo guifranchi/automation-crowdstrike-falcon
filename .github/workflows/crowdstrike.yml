@@ -1,0 +1,209 @@
+# .github/workflows/crowdstrike.yml
+name: CrowdStrike Falcon Agent Management
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Action to perform'
+        required: true
+        default: 'install'
+        type: choice
+        options:
+          - install
+          - uninstall
+      os_target:
+        description: 'Target operating system'
+        required: true
+        default: 'both'
+        type: choice
+        options:
+          - windows
+          - linux
+          - both
+      target_ips:
+        description: 'Comma-separated list of target IP addresses'
+        required: true
+        type: string
+        default: ''
+
+env:
+  ANSIBLE_HOST_KEY_CHECKING: False
+  ANSIBLE_STDOUT_CALLBACK: yaml
+
+jobs:
+  crowdstrike-management:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+
+    - name: Install Ansible and dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install ansible pywinrm requests
+        pip install crowdstrike-falconpy
+
+    - name: Install Ansible collections
+      run: |
+        ansible-galaxy collection install crowdstrike.falcon
+        ansible-galaxy collection install ansible.windows
+        ansible-galaxy collection install community.windows
+
+    - name: Validate inputs
+      run: |
+        if [ -z "${{ github.event.inputs.target_ips }}" ]; then
+          echo "ERROR: target_ips cannot be empty"
+          exit 1
+        fi
+        
+        # Validate action
+        if [[ ! "${{ github.event.inputs.action }}" =~ ^(install|uninstall)$ ]]; then
+          echo "ERROR: action must be 'install' or 'uninstall'"
+          exit 1
+        fi
+        
+        # Validate os_target
+        if [[ ! "${{ github.event.inputs.os_target }}" =~ ^(windows|linux|both)$ ]]; then
+          echo "ERROR: os_target must be 'windows', 'linux', or 'both'"
+          exit 1
+        fi
+        
+        echo "✅ Input validation passed"
+
+    - name: Create dynamic inventory
+      run: |
+        mkdir -p ansible
+        cat > ansible/inventory.yml << 'EOF'
+        all:
+          children:
+            windows:
+              hosts:
+        EOF
+        
+        # Process target IPs and categorize them
+        IFS=',' read -ra IPS <<< "${{ github.event.inputs.target_ips }}"
+        
+        # Initialize arrays
+        WINDOWS_IPS=()
+        LINUX_IPS=()
+        
+        # For this workflow, we'll assume IPs ending in even numbers are Windows
+        # and odd numbers are Linux. In production, you'd have a better way to identify OS.
+        # Alternative: Use nmap or SSH/WinRM probes to detect OS
+        
+        for ip in "${IPS[@]}"; do
+          ip=$(echo $ip | xargs)  # trim whitespace
+          if [ -n "$ip" ]; then
+            # Simple heuristic: check if port 3389 (RDP) is open for Windows detection
+            # This is a basic approach - in production you'd have better OS detection
+            last_octet=$(echo $ip | cut -d'.' -f4)
+            if [ $((last_octet % 2)) -eq 0 ]; then
+              WINDOWS_IPS+=($ip)
+            else
+              LINUX_IPS+=($ip)
+            fi
+          fi
+        done
+        
+        # Build inventory file
+        cat > ansible/inventory.yml << 'EOF'
+        all:
+          children:
+            windows:
+              hosts:
+        EOF
+        
+        # Add Windows hosts
+        for ip in "${WINDOWS_IPS[@]}"; do
+          cat >> ansible/inventory.yml << EOF
+                $ip:
+                  ansible_host: $ip
+                  ansible_user: ${{ secrets.WINDOWS_ADMIN_USERNAME }}
+                  ansible_password: ${{ secrets.WINDOWS_ADMIN_PASSWORD }}
+                  ansible_connection: winrm
+                  ansible_winrm_transport: basic
+                  ansible_winrm_server_cert_validation: ignore
+                  ansible_port: 5985
+        EOF
+        done
+        
+        cat >> ansible/inventory.yml << 'EOF'
+            linux:
+              hosts:
+        EOF
+        
+        # Add Linux hosts
+        for ip in "${LINUX_IPS[@]}"; do
+          cat >> ansible/inventory.yml << EOF
+                $ip:
+                  ansible_host: $ip
+                  ansible_user: ${{ secrets.LINUX_ADMIN_USERNAME }}
+                  ansible_password: ${{ secrets.LINUX_ADMIN_PASSWORD }}
+                  ansible_connection: ssh
+                  ansible_port: 22
+                  ansible_ssh_common_args: '-o StrictHostKeyChecking=no'
+        EOF
+        done
+        
+        echo "📋 Generated inventory:"
+        cat ansible/inventory.yml
+
+    - name: Test connectivity
+      run: |
+        cd ansible
+        
+        # Test Windows connectivity if targeting Windows
+        if [[ "${{ github.event.inputs.os_target }}" == "windows" || "${{ github.event.inputs.os_target }}" == "both" ]]; then
+          echo "🔍 Testing Windows connectivity..."
+          ansible windows -i inventory.yml -m win_ping --timeout=30 || echo "⚠️ Some Windows hosts may be unreachable"
+        fi
+        
+        # Test Linux connectivity if targeting Linux
+        if [[ "${{ github.event.inputs.os_target }}" == "linux" || "${{ github.event.inputs.os_target }}" == "both" ]]; then
+          echo "🔍 Testing Linux connectivity..."
+          ansible linux -i inventory.yml -m ping --timeout=30 || echo "⚠️ Some Linux hosts may be unreachable"
+        fi
+
+    - name: Run CrowdStrike Falcon playbook
+      run: |
+        cd ansible
+        
+        # Set extra variables for the playbook
+        EXTRA_VARS="falcon_action=${{ github.event.inputs.action }}"
+        EXTRA_VARS="$EXTRA_VARS os_target=${{ github.event.inputs.os_target }}"
+        EXTRA_VARS="$EXTRA_VARS falcon_cid=${{ secrets.FALCON_CID }}"
+        EXTRA_VARS="$EXTRA_VARS falcon_cloud=${{ secrets.FALCON_CLOUD || 'us-1' }}"
+        
+        # Add optional API credentials if they exist
+        if [ -n "${{ secrets.FALCON_CLIENT_ID }}" ]; then
+          EXTRA_VARS="$EXTRA_VARS falcon_client_id=${{ secrets.FALCON_CLIENT_ID }}"
+        fi
+        
+        if [ -n "${{ secrets.FALCON_CLIENT_SECRET }}" ]; then
+          EXTRA_VARS="$EXTRA_VARS falcon_client_secret=${{ secrets.FALCON_CLIENT_SECRET }}"
+        fi
+        
+        echo "🚀 Running Ansible playbook with action: ${{ github.event.inputs.action }}"
+        echo "🎯 Target OS: ${{ github.event.inputs.os_target }}"
+        
+        ansible-playbook -i inventory.yml playbook.yml \
+          --extra-vars "$EXTRA_VARS" \
+          --timeout=300 \
+          -v
+
+    - name: Upload Ansible logs
+      if: always()
+      uses: actions/upload-artifact@v3
+      with:
+        name: ansible-logs-${{ github.run_number }}
+        path: |
+          ansible/inventory.yml
+          ansible/*.log
+        retention-days: 7

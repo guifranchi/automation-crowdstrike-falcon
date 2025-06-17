@@ -1,0 +1,40 @@
+# terraform/terraform.tfvars.example
+# Copy this file to terraform.tfvars and update with your values
+
+# Basic Configuration
+resource_group_name = "rg-crowdstrike-falcon-dev"
+location           = "East US"  # Use cheaper regions like "East US" or "South Central US"
+prefix             = "falcon"
+
+# VM Sizes - Using cheapest available options
+linux_vm_size   = "Standard_B1s"   # ~$4.38/month (1 vCPU, 1GB RAM)
+windows_vm_size = "Standard_B1ms"  # ~$15.77/month (1 vCPU, 2GB RAM)
+
+# Linux VM Credentials
+linux_admin_username = "azureuser"
+linux_admin_password = "ChangeMe123!@#"  # Must meet Azure complexity requirements
+
+# Windows VM Credentials  
+windows_admin_username = "azureuser"
+windows_admin_password = "ChangeMe123!@#"  # Must meet Azure complexity requirements
+
+# Resource Tags
+tags = {
+  Environment   = "Development"
+  Project       = "CrowdStrike-Falcon"
+  ManagedBy     = "Terraform"
+  Owner         = "SecurityTeam"
+  CostCenter    = "IT-Security"
+  CreatedDate   = "2024-01-15"
+}
+
+# Password Requirements for Azure VMs:
+# - At least 12 characters long
+# - Contains 3 of the following: lowercase, uppercase, numbers, special characters
+# - Cannot contain username or parts of username
+# - Cannot be one of the last 24 passwords
+
+# Example strong passwords:
+# linux_admin_password = "MySecur3P@ssw0rd2024!"
+# windows_admin_password = "W1nd0ws$ecur1ty2024#"
+

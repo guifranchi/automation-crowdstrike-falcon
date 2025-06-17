@@ -1,0 +1,170 @@
+# ansible/playbook.yml
+---
+- name: CrowdStrike Falcon Agent Management
+  hosts: all
+  gather_facts: yes
+  vars:
+    falcon_action: "{{ falcon_action | default('install') }}"
+    os_target: "{{ os_target | default('both') }}"
+    falcon_cid: "{{ falcon_cid }}"
+    falcon_client_id: "{{ falcon_client_id | default('') }}"
+    falcon_client_secret: "{{ falcon_client_secret | default('') }}"
+    falcon_cloud: "{{ falcon_cloud | default('us-1') }}"
+
+  pre_tasks:
+    - name: Display playbook parameters
+      debug:
+        msg:
+          - "Action: {{ falcon_action }}"
+          - "OS Target: {{ os_target }}"
+          - "Current Host: {{ inventory_hostname }}"
+          - "Host OS Family: {{ ansible_os_family }}"
+      delegate_to: localhost
+      run_once: true
+
+    - name: Validate required variables
+      fail:
+        msg: "falcon_cid is required when not using API credentials"
+      when: 
+        - falcon_cid is not defined or falcon_cid == ""
+        - falcon_client_id == "" or falcon_client_secret == ""
+      delegate_to: localhost
+      run_once: true
+
+- name: Manage CrowdStrike Falcon on Windows hosts
+  hosts: windows
+  gather_facts: yes
+  vars:
+    falcon_action: "{{ falcon_action | default('install') }}"
+    falcon_cid: "{{ falcon_cid }}"
+    falcon_client_id: "{{ falcon_client_id | default('') }}"
+    falcon_client_secret: "{{ falcon_client_secret | default('') }}"
+    falcon_cloud: "{{ falcon_cloud | default('us-1') }}"
+  
+  tasks:
+    - name: Check if we should run on Windows
+      meta: end_host
+      when: os_target not in ['windows', 'both']
+
+    - name: Install CrowdStrike Falcon on Windows
+      when: falcon_action == 'install'
+      block:
+        - name: Install Falcon Sensor
+          include_role:
+            name: crowdstrike.falcon.falcon_install
+          vars:
+            falcon_windows_install_args: "/norestart ProvWaitTime=600"
+            falcon_windows_become: true
+            falcon_windows_become_method: runas
+            falcon_windows_become_user: SYSTEM
+
+        - name: Configure Falcon Sensor (if CID provided)
+          include_role:
+            name: crowdstrike.falcon.falcon_configure
+          when: falcon_cid != ""
+
+    - name: Uninstall CrowdStrike Falcon on Windows
+      when: falcon_action == 'uninstall'
+      block:
+        - name: Uninstall Falcon Sensor
+          include_role:
+            name: crowdstrike.falcon.falcon_uninstall
+          vars:
+            falcon_windows_uninstall_args: "/norestart"
+            falcon_windows_become: true
+            falcon_windows_become_method: runas
+            falcon_windows_become_user: SYSTEM
+
+- name: Manage CrowdStrike Falcon on Linux hosts
+  hosts: linux
+  gather_facts: yes
+  become: yes
+  vars:
+    falcon_action: "{{ falcon_action | default('install') }}"
+    falcon_cid: "{{ falcon_cid }}"
+    falcon_client_id: "{{ falcon_client_id | default('') }}"
+    falcon_client_secret: "{{ falcon_client_secret | default('') }}"
+    falcon_cloud: "{{ falcon_cloud | default('us-1') }}"
+  
+  tasks:
+    - name: Check if we should run on Linux
+      meta: end_host
+      when: os_target not in ['linux', 'both']
+
+    - name: Install CrowdStrike Falcon on Linux
+      when: falcon_action == 'install'
+      block:
+        - name: Install Falcon Sensor
+          include_role:
+            name: crowdstrike.falcon.falcon_install
+
+        - name: Configure Falcon Sensor
+          include_role:
+            name: crowdstrike.falcon.falcon_configure
+          vars:
+            falcon_tags: "ansible-managed,automated-deployment"
+
+    - name: Uninstall CrowdStrike Falcon on Linux
+      when: falcon_action == 'uninstall'
+      block:
+        - name: Uninstall Falcon Sensor
+          include_role:
+            name: crowdstrike.falcon.falcon_uninstall
+
+# Post-installation verification for all hosts
+- name: Verify Falcon Agent Status
+  hosts: all
+  gather_facts: yes
+  tasks:
+    - name: Check if we should run verification
+      meta: end_host
+      when: falcon_action != 'install'
+
+    - name: Get Falcon sensor information (Linux/macOS)
+      crowdstrike.falcon.falconctl_info:
+      register: falcon_info
+      when: ansible_os_family != "Windows"
+      ignore_errors: yes
+
+    - name: Display Falcon sensor status (Linux/macOS)
+      debug:
+        msg:
+          - "Falcon CID: {{ falcon_info.falconctl_info.cid | default('Not configured') }}"
+          - "Falcon AID: {{ falcon_info.falconctl_info.aid | default('Not assigned yet') }}"
+          - "Falcon Version: {{ falcon_info.falconctl_info.version | default('Unknown') }}"
+      when: 
+        - ansible_os_family != "Windows"
+        - falcon_info is defined
+        - not falcon_info.failed
+
+    - name: Check Falcon service status (Windows)
+      win_service:
+        name: CSFalconService
+      register: falcon_service_win
+      when: ansible_os_family == "Windows"
+      ignore_errors: yes
+
+    - name: Display Falcon service status (Windows)
+      debug:
+        msg:
+          - "Falcon Service State: {{ falcon_service_win.state | default('Unknown') }}"
+          - "Falcon Service Status: {{ falcon_service_win.status | default('Unknown') }}"
+      when: 
+        - ansible_os_family == "Windows"
+        - falcon_service_win is defined
+
+    - name: Check Falcon sensor service (Linux)
+      systemd:
+        name: falcon-sensor
+      register: falcon_service_linux
+      when: ansible_os_family != "Windows"
+      ignore_errors: yes
+
+    - name: Display Falcon service status (Linux)
+      debug:
+        msg:
+          - "Falcon Service State: {{ falcon_service_linux.status.ActiveState | default('Unknown') }}"
+          - "Falcon Service Status: {{ falcon_service_linux.status.SubState | default('Unknown') }}"
+      when: 
+        - ansible_os_family != "Windows"
+        - falcon_service_linux is defined

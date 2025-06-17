@@ -1,0 +1,18 @@
+# ansible/requirements.yml
+---
+collections:
+  - name: crowdstrike.falcon
+    version: ">=4.8.0"
+    source: https://galaxy.ansible.com
+  - name: ansible.windows
+    version: ">=1.0.0"
+  - name: community.windows
+    version: ">=1.0.0"
+
+# Python requirements for the collection
+# Install with: pip install -r requirements.txt
+# These are included in the GitHub Actions workflow but listed here for reference
+python:
+  - crowdstrike-falconpy>=1.3.0
+  - requests>=2.25.0
+  - pywinrm>=0.4.3

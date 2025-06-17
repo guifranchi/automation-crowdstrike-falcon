@@ -1,0 +1,120 @@
+# ansible/roles/windows/tasks/install.yml
+---
+- name: Windows - Check if CrowdStrike Falcon is already installed
+  win_service:
+    name: "CSFalconService"
+  register: falcon_service_status
+  ignore_errors: yes
+
+- name: Windows - Display current Falcon service status
+  debug:
+    msg: "CrowdStrike Falcon service status: {{ falcon_service_status }}"
+
+- name: Windows - Create temporary directory for Falcon installer
+  win_tempfile:
+    state: directory
+    suffix: falcon
+  register: temp_dir
+  when: falcon_service_status.failed or falcon_service_status.state != 'running'
+
+- name: Windows - Download CrowdStrike Falcon installer
+  win_get_url:
+    url: "https://registry.crowdstrike.com/falcon-sensor/sensor_download/latest/windows"
+    dest: "{{ temp_dir.path }}\\falcon-installer.msi"
+    headers:
+      Authorization: "Bearer {{ falcon_api_token | default('') }}"
+    timeout: 300
+  register: download_result
+  when: 
+    - falcon_service_status.failed or falcon_service_status.state != 'running'
+    - falcon_api_client_id != '' and falcon_api_client_secret != ''
+  ignore_errors: yes
+
+- name: Windows - Use local installer if download failed
+  debug:
+    msg: "Using local installer or manual download method"
+  when: download_result.failed is defined and download_result.failed
+
+- name: Windows - Install CrowdStrike Falcon agent
+  win_package:
+    path: "{{ temp_dir.path }}\\falcon-installer.msi"
+    arguments: "/quiet CID={{ falcon_cid }} /norestart"
+    state: present
+    wait_timeout: 600
+  register: install_result
+  when: 
+    - falcon_service_status.failed or falcon_service_status.state != 'running'
+    - download_result.failed is not defined or not download_result.failed
+
+- name: Windows - Alternative install method using PowerShell (if MSI install failed)
+  win_shell: |
+    # Alternative installation method using PowerShell
+    # This would be used if you have the installer in a known location
+    $installerPath = "C:\temp\falcon-installer.msi"
+    if (Test-Path $installerPath) {
+        Start-Process msiexec.exe -ArgumentList "/i `"$installerPath`" /quiet CID={{ falcon_cid }} /norestart" -Wait
+        exit $LASTEXITCODE
+    } else {
+        Write-Output "Installer not found at $installerPath"
+        exit 1
+    }
+  register: alt_install_result
+  when: 
+    - falcon_service_status.failed or falcon_service_status.state != 'running'
+    - install_result.failed is defined and install_result.failed
+  ignore_errors: yes
+
+- name: Windows - Wait for service to be created
+  win_service:
+    name: "CSFalconService"
+  register: service_check
+  retries: 12
+  delay: 10
+  until: not service_check.failed
+  when: install_result.changed or (alt_install_result.changed is defined and alt_install_result.changed)
+
+- name: Windows - Start CrowdStrike Falcon service
+  win_service:
+    name: "CSFalconService"
+    state: started
+    start_mode: auto
+  register: start_service
+  when: install_result.changed or (alt_install_result.changed is defined and alt_install_result.changed)
+
+- name: Windows - Verify Falcon agent installation
+  win_shell: |
+    $service = Get-Service -Name "CSFalconService" -ErrorAction SilentlyContinue
+    if ($service -and $service.Status -eq "Running") {
+        # Check if agent is communicating with cloud
+        $falconCtl = "C:\Program Files\CrowdStrike\CSFalconContainer.exe"
+        if (Test-Path $falconCtl) {
+            $output = & $falconCtl stats agent_info 2>&1
+            Write-Output "Falcon Agent Status: $output"
+        }
+        Write-Output "SUCCESS: CrowdStrike Falcon is installed and running"
+        exit 0
+    } else {
+        Write-Output "ERROR: CrowdStrike Falcon service is not running"
+        exit 1
+    }
+  register: verification_result
+
+- name: Windows - Display installation result
+  debug:
+    msg: 
+      - "Installation completed on {{ inventory_hostname }}"
+      - "Service status: {{ start_service.state | default('Unknown') }}"
+      - "Verification: {{ verification_result.stdout_lines | default(['Not verified']) }}"
+
+- name: Windows - Clean up temporary files
+  win_file:
+    path: "{{ temp_dir.path }}"
+    state: absent
+  when: temp_dir is defined
+  ignore_errors: yes
+
+- name: Windows - Installation summary
+  debug:
+    msg: "✅ CrowdStrike Falcon agent installation completed on {{ inventory_hostname }}"
+  when: verification_result.rc == 0
+

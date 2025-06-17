@@ -1,0 +1,157 @@
+# ansible/roles/windows/tasks/uninstall.yml
+---
+- name: Windows - Check if CrowdStrike Falcon is installed
+  win_service:
+    name: "CSFalconService"
+  register: falcon_service_status
+  ignore_errors: yes
+
+- name: Windows - Skip uninstall if Falcon is not installed
+  debug:
+    msg: "CrowdStrike Falcon is not installed on {{ inventory_hostname }}"
+  when: falcon_service_status.failed
+
+- name: Windows - Stop CrowdStrike Falcon service
+  win_service:
+    name: "CSFalconService"
+    state: stopped
+  register: stop_service
+  when: not falcon_service_status.failed
+  ignore_errors: yes
+
+- name: Windows - Get installed CrowdStrike products
+  win_shell: |
+    Get-WmiObject -Class Win32_Product | Where-Object { $_.Name -like "*CrowdStrike*" -or $_.Name -like "*Falcon*" } | Select-Object Name, IdentifyingNumber, Version
+  register: crowdstrike_products
+  when: not falcon_service_status.failed
+
+- name: Windows - Display found CrowdStrike products
+  debug:
+    msg: "Found CrowdStrike products: {{ crowdstrike_products.stdout_lines | default(['None found']) }}"
+  when: not falcon_service_status.failed
+
+- name: Windows - Uninstall CrowdStrike Falcon using MSI
+  win_shell: |
+    # Get the product code for CrowdStrike Falcon
+    $product = Get-WmiObject -Class Win32_Product | Where-Object { $_.Name -like "*CrowdStrike*" -or $_.Name -like "*Falcon*" }
+    if ($product) {
+        foreach ($p in $product) {
+            Write-Output "Uninstalling: $($p.Name) - $($p.IdentifyingNumber)"
+            $result = Start-Process msiexec.exe -ArgumentList "/x `"$($p.IdentifyingNumber)`" /quiet /norestart" -Wait -PassThru
+            Write-Output "Uninstall exit code: $($result.ExitCode)"
+        }
+        exit 0
+    } else {
+        Write-Output "No CrowdStrike products found to uninstall"
+        exit 1
+    }
+  register: uninstall_result
+  when: not falcon_service_status.failed
+
+- name: Windows - Alternative uninstall using registry cleanup
+  win_shell: |
+    # Alternative method: Use registry to find and remove Falcon
+    $uninstallKeys = @(
+        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
+        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
+    )
+    
+    $falconApps = Get-ItemProperty $uninstallKeys | Where-Object { $_.DisplayName -like "*CrowdStrike*" -or $_.DisplayName -like "*Falcon*" }
+    
+    if ($falconApps) {
+        foreach ($app in $falconApps) {
+            Write-Output "Found: $($app.DisplayName)"
+            if ($app.UninstallString) {
+                Write-Output "Uninstall string: $($app.UninstallString)"
+                if ($app.UninstallString -like "*msiexec*") {
+                    $productCode = ($app.UninstallString -split "/I" -split "/X")[1].Trim()
+                    Start-Process msiexec.exe -ArgumentList "/x $productCode /quiet /norestart" -Wait
+                }
+            }
+        }
+        exit 0
+    } else {
+        Write-Output "No CrowdStrike applications found in registry"
+        exit 1
+    }
+  register: alt_uninstall_result
+  when: 
+    - not falcon_service_status.failed
+    - uninstall_result.rc != 0
+  ignore_errors: yes
+
+- name: Windows - Remove CrowdStrike directories
+  win_file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "C:\\Program Files\\CrowdStrike"
+    - "C:\\Program Files (x86)\\CrowdStrike"
+    - "C:\\ProgramData\\CrowdStrike"
+  when: not falcon_service_status.failed
+  ignore_errors: yes
+
+- name: Windows - Remove CrowdStrike services manually
+  win_shell: |
+    $services = Get-Service | Where-Object { $_.Name -like "*Falcon*" -or $_.Name -like "*CrowdStrike*" }
+    foreach ($service in $services) {
+        Write-Output "Removing service: $($service.Name)"
+        Stop-Service $service.Name -Force -ErrorAction SilentlyContinue
+        & sc.exe delete $service.Name
+    }
+  when: not falcon_service_status.failed
+  ignore_errors: yes
+
+- name: Windows - Clean up registry entries
+  win_shell: |
+    # Remove CrowdStrike registry entries
+    $registryPaths = @(
+        "HKLM:\SOFTWARE\CrowdStrike",
+        "HKLM:\SOFTWARE\WOW6432Node\CrowdStrike",
+        "HKLM:\SYSTEM\CurrentControlSet\Services\CSFalconService"
+    )
+    
+    foreach ($path in $registryPaths) {
+        if (Test-Path $path) {
+            Write-Output "Removing registry path: $path"
+            Remove-Item $path -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+  when: not falcon_service_status.failed
+  ignore_errors: yes
+
+- name: Windows - Verify CrowdStrike Falcon removal
+  win_shell: |
+    # Check if service still exists
+    $service = Get-Service -Name "CSFalconService" -ErrorAction SilentlyContinue
+    if ($service) {
+        Write-Output "ERROR: CrowdStrike Falcon service still exists"
+        exit 1
+    }
+    
+    # Check if installation directory still exists
+    if (Test-Path "C:\Program Files\CrowdStrike") {
+        Write-Output "WARNING: CrowdStrike directory still exists"
+    }
+    
+    # Check registry
+    if (Test-Path "HKLM:\SOFTWARE\CrowdStrike") {
+        Write-Output "WARNING: CrowdStrike registry entries still exist"
+    }
+    
+    Write-Output "SUCCESS: CrowdStrike Falcon appears to be removed"
+    exit 0
+  register: removal_verification
+
+- name: Windows - Display uninstall result
+  debug:
+    msg: 
+      - "Uninstallation completed on {{ inventory_hostname }}"
+      - "Uninstall result: {{ uninstall_result.stdout_lines | default(['Not attempted']) }}"
+      - "Verification: {{ removal_verification.stdout_lines | default(['Not verified']) }}"
+
+- name: Windows - Uninstall summary
+  debug:
+    msg: "✅ CrowdStrike Falcon agent uninstallation completed on {{ inventory_hostname }}"
+  when: removal_verification.rc == 0
+

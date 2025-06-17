@@ -1,0 +1,176 @@
+# ansible/roles/linux/tasks/uninstall.yml
+---
+- name: Linux - Check if CrowdStrike Falcon is installed
+  systemd:
+    name: falcon-sensor
+  register: falcon_service_status
+  ignore_errors: yes
+
+- name: Linux - Skip uninstall if Falcon is not installed
+  debug:
+    msg: "CrowdStrike Falcon is not installed on {{ inventory_hostname }}"
+  when: falcon_service_status.failed
+
+- name: Linux - Stop CrowdStrike Falcon service
+  systemd:
+    name: falcon-sensor
+    state: stopped
+  register: stop_service
+  when: not falcon_service_status.failed
+  ignore_errors: yes
+
+- name: Linux - Disable CrowdStrike Falcon service
+  systemd:
+    name: falcon-sensor
+    enabled: no
+  when: not falcon_service_status.failed
+  ignore_errors: yes
+
+- name: Linux - Check for installed Falcon packages (Debian/Ubuntu)
+  shell: dpkg -l | grep -i falcon | awk '{print $2}'
+  register: falcon_packages_deb
+  when: 
+    - not falcon_service_status.failed
+    - ansible_os_family == "Debian"
+  changed_when: false
+
+- name: Linux - Check for installed Falcon packages (RHEL/CentOS)
+  shell: rpm -qa | grep -i falcon
+  register: falcon_packages_rpm
+  when: 
+    - not falcon_service_status.failed
+    - ansible_os_family == "RedHat"
+  changed_when: false
+
+- name: Linux - Display found Falcon packages (Debian/Ubuntu)
+  debug:
+    msg: "Found Falcon packages: {{ falcon_packages_deb.stdout_lines | default(['None found']) }}"
+  when: 
+    - not falcon_service_status.failed
+    - ansible_os_family == "Debian"
+
+- name: Linux - Display found Falcon packages (RHEL/CentOS)
+  debug:
+    msg: "Found Falcon packages: {{ falcon_packages_rpm.stdout_lines | default(['None found']) }}"
+  when: 
+    - not falcon_service_status.failed
+    - ansible_os_family == "RedHat"
+
+- name: Linux - Uninstall CrowdStrike Falcon (Debian/Ubuntu)
+  apt:
+    name: "{{ item }}"
+    state: absent
+    purge: yes
+  loop: "{{ falcon_packages_deb.stdout_lines | default([]) }}"
+  register: uninstall_deb_result
+  when: 
+    - not falcon_service_status.failed
+    - ansible_os_family == "Debian"
+    - falcon_packages_deb.stdout_lines | length > 0
+
+- name: Linux - Uninstall CrowdStrike Falcon (RHEL/CentOS)
+  yum:
+    name: "{{ item }}"
+    state: absent
+  loop: "{{ falcon_packages_rpm.stdout_lines | default([]) }}"
+  register: uninstall_rpm_result
+  when: 
+    - not falcon_service_status.failed
+    - ansible_os_family == "RedHat"
+    - falcon_packages_rpm.stdout_lines | length > 0
+
+- name: Linux - Remove CrowdStrike directories and files
+  file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /opt/CrowdStrike
+    - /etc/systemd/system/falcon-sensor.service
+    - /var/log/falcon-sensor.log
+    - /var/lib/crowdstrike
+  when: not falcon_service_status.failed
+  ignore_errors: yes
+
+- name: Linux - Remove Falcon-related processes
+  shell: |
+    # Kill any remaining falcon processes
+    pkill -f falcon-sensor 2>/dev/null || true
+    pkill -f falconctl 2>/dev/null || true
+    
+    # Remove any falcon kernel modules
+    lsmod | grep falcon | awk '{print $1}' | xargs -r rmmod 2>/dev/null || true
+  when: not falcon_service_status.failed
+  ignore_errors: yes
+
+- name: Linux - Clean up systemd
+  systemd:
+    daemon_reload: yes
+  when: not falcon_service_status.failed
+
+- name: Linux - Remove Falcon user and group
+  group:
+    name: falcon
+    state: absent
+  when: not falcon_service_status.failed
+  ignore_errors: yes
+
+- name: Linux - Remove Falcon user
+  user:
+    name: falcon
+    state: absent
+    remove: yes
+  when: not falcon_service_status.failed
+  ignore_errors: yes
+
+- name: Linux - Clean up package cache (Debian/Ubuntu)
+  apt:
+    autoclean: yes
+    autoremove: yes
+  when: 
+    - not falcon_service_status.failed
+    - ansible_os_family == "Debian"
+  ignore_errors: yes
+
+- name: Linux - Clean up package cache (RHEL/CentOS)
+  shell: yum clean all
+  when: 
+    - not falcon_service_status.failed
+    - ansible_os_family == "RedHat"
+  ignore_errors: yes
+
+- name: Linux - Verify CrowdStrike Falcon removal
+  shell: |
+    # Check if service still exists
+    systemctl status falcon-sensor 2>/dev/null && echo "ERROR: Service still exists" && exit 1
+    
+    # Check if installation directory still exists
+    [ -d /opt/CrowdStrike ] && echo "WARNING: CrowdStrike directory still exists"
+    
+    # Check if any falcon processes are running
+    pgrep -f falcon && echo "WARNING: Falcon processes still running"
+    
+    # Check for remaining packages
+    if command -v dpkg >/dev/null 2>&1; then
+        dpkg -l | grep -i falcon && echo "WARNING: Falcon packages still installed"
+    elif command -v rpm >/dev/null 2>&1; then
+        rpm -qa | grep -i falcon && echo "WARNING: Falcon packages still installed"
+    fi
+    
+    echo "SUCCESS: CrowdStrike Falcon appears to be removed"
+    exit 0
+  register: removal_verification
+  ignore_errors: yes
+
+- name: Linux - Display uninstall result
+  debug:
+    msg: 
+      - "Uninstallation completed on {{ inventory_hostname }}"
+      - "Packages removed (Debian): {{ uninstall_deb_result.results | default(['Not applicable']) | map(attribute='item') | list }}"
+      - "Packages removed (RHEL): {{ uninstall_rpm_result.results | default(['Not applicable']) | map(attribute='item') | list }}"
+      - "Verification: {{ removal_verification.stdout_lines | default(['Not verified']) }}"
+
+- name: Linux - Uninstall summary
+  debug:
+    msg: "✅ CrowdStrike Falcon agent uninstallation completed on {{ inventory_hostname }}"
+  when: removal_verification.rc == 0
+
