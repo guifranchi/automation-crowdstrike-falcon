@@ -1,4 +1,4 @@
-# CrowdStrike Falcon Agent Automation
+# CrowdStrike Falcon Agent Automation (v-1.0)
 
 This repository provides a complete automation solution for deploying and managing CrowdStrike Falcon agents on Azure infrastructure using Terraform, Ansible, and GitHub Actions. **This solution uses the official [CrowdStrike Ansible Collection](https://github.com/CrowdStrike/ansible_collection_falcon)** for reliable, tested, and maintained Falcon agent management.
 
